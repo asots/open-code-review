@@ -17,7 +17,7 @@ compatibility: >
 metadata:
   author: alibaba
   homepage: https://github.com/alibaba/open-code-review
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # Open Code Review
@@ -29,6 +29,10 @@ materialize the plugin subtree.
 
 A skill for invoking [open-code-review](https://github.com/alibaba/open-code-review) (`ocr`) — an open-source AI code review CLI that reads Git diffs and generates structured, line-level review comments.
 
+## Two Review Modes
+
+This skill drives OCR's own LLM review. When you are the host agent and want to perform the review yourself — for example as a TAV/spec Verifier — use the `open-code-review-delegate` skill instead: OCR only selects files and resolves rules, and no OCR LLM endpoint is needed. Do not run `ocr review` inside a TAV/spec verification pass; use `ocr delegate` there and never install the CLI during a review. See § "Integration with TAV and Spec-Driven Development" for the full contract.
+
 ## Workflow
 
 ### Step 1: Gather Business Context
@@ -37,7 +41,7 @@ Analyze the review target (commits, branch, or changes) to extract concise busin
 
 ### Step 2: Run Code Review
 
-**Do not pre-check whether `ocr` is installed** — skip probes like `command -v ocr` or `ocr --version`. Assume the CLI is available and run the review directly; that saves a tool call on the common path. Only if the review fails with `command not found` should you install it per Troubleshooting.
+**Do not pre-check whether `ocr` is installed** — skip probes like `command -v ocr` or `ocr --version`. Assume the CLI is available and run the review directly; that saves a tool call on the common path. Only if the review fails with `command not found` should you install it per Troubleshooting. **Exception**: inside a TAV/spec Verifier pass, follow that workflow instead — probe `ocr --version` and `ocr delegate --help`, use the `open-code-review-delegate` skill, and never install OCR during the review.
 
 Run the OCR command with appropriate flags. **Always pass business context via `--background`** when available:
 
@@ -69,7 +73,7 @@ ocr review --audience agent --background "business context here" [user-args]
 **Output mode:**
 
 - Always use `--audience agent` to suppress progress UI and emit only the final summary
-- **Prevent output truncation**: For large reviews or restricted tool environments, pass `--output /tmp/ocr_out.txt` and inspect the file in full via a file reading tool instead of piping stdout through `tail` or `head`, which drops earlier review comments.
+- **Prevent output truncation**: For large reviews or restricted tool environments, pass `--output <absolute-path-outside-repo>` (for example a path under the host temp directory) and inspect the file in full via a file reading tool instead of piping stdout through `tail` or `head`, which drops earlier review comments.
 
 **On failure:** If `ocr review` exits non-zero (e.g. an LLM connection error), do not retry blindly — consult the Troubleshooting section below for the matching fix before re-running.
 

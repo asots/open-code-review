@@ -1,7 +1,7 @@
 {
   "name": "open-code-review",
   "displayName": "Open Code Review",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "AI-powered code review on Git diffs — supports workspace changes, branch ranges, and single commits with concurrent per-file analysis, codebase search, and deep context-aware review.",
   "author": {
     "name": "Alibaba"

@@ -15,7 +15,7 @@ compatibility: >
 metadata:
   author: alibaba
   homepage: https://github.com/alibaba/open-code-review
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # Open Code Review — Delegation Mode
@@ -26,6 +26,8 @@ updating OCR delegation instructions; a symlink is avoided because plugin
 installs may only materialize the plugin subtree.
 
 A skill for performing AI code review where OCR provides deterministic engineering (file filtering, rule resolution) and the host agent performs the actual review using its own intelligence and tools.
+
+Use this skill instead of `open-code-review` when you are the host agent driving the review (for example a TAV/spec Verifier) or when OCR has no configured LLM endpoint. The `open-code-review` skill remains the entry point when OCR should run its own LLM review.
 
 ## Workflow
 
@@ -122,6 +124,8 @@ Each comment must follow this structure:
 | end_line | integer | no | End line in the new file |
 | category | enum | no | bug, security, performance, maintainability, test, style, documentation, other |
 | severity | enum | no | critical, high, medium, low |
+| suggestion_code | string | no | Suggested replacement code for the commented range |
+| existing_code | string | no | Original code snippet the comment refers to |
 
 ### Step 6: Classify and Report
 
@@ -201,6 +205,10 @@ run. Preserve the explicit mode, ref, file, and rule information from that
 output; do not parse text output as JSON or invent missing schema fields. Do
 not retry without the flag for any other error; report it and stop the affected
 workflow.
+
+If `ocr delegate` itself is unknown, the installed CLI build does not include
+delegation. During a TAV/spec review, do not install or upgrade it; fall back to
+the manual Standards pass and report the missing capability.
 
 The host-agent Skill may consume the equivalent text output to complete its
 review checklist. Programmatic integrations that require `schema_version` or
