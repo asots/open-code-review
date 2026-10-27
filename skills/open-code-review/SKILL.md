@@ -14,9 +14,9 @@ compatibility: >
   @alibaba-group/open-code-review` or GitHub release binary). Requires a
   configured supported LLM provider before first run (protocols: Anthropic,
   OpenAI Chat Completions, OpenAI Responses, AWS Bedrock).
-  Integrates with:
-  - tav-workflow >=3.20.0 (Verifier Standards axis)
-  - spec-driven-develop >=1.29.0 (Phase 5b batch validation)
+  Integrates in delegation mode with:
+  - tav-workflow >=3.20.0 (Verifier Standards axis, ocr >=1.9.0)
+  - spec-driven-develop >=1.29.0 (Phase 5b batch validation, ocr >=1.9.0)
 metadata:
   author: alibaba
   homepage: https://github.com/alibaba/open-code-review
@@ -197,150 +197,44 @@ Beyond the common flags above, `ocr review` exposes a few groups of controls. Ru
 
 ## Integration with TAV and Spec-Driven Development
 
+OCR integrates with the workflows through **delegation mode**: the host agent performs the review, while OCR supplies deterministic engineering only — file selection and rule resolution. Delegation calls no LLM, so TAV and SDD keep their own judgment, Spec axis, machine gates, and security review. Delegation mode is packaged as the separate `open-code-review-delegate` skill.
+
 ### With TAV Workflow
 
-When invoked from TAV Verifier (Phase 3), OCR handles the **Standards axis** of the two-axis review:
+TAV's Verifier owns the Standards axis; OCR narrows its scope:
 
-**Input from TAV**:
-- Business context from Thinker's diagnosis (`.tav/thinker-output.md` or Thinker phase output)
-- Changed files from `git diff` output
-- Project rules from `.opencodereview/rule.json` or TAV-managed governance surfaces
+1. `ocr delegate preview --format json` lists the reviewable files (staged, unstaged, and untracked in workspace mode; `--from`/`--to` or `--commit` for a range or commit).
+2. `ocr delegate rule --format json <path...>` resolves the rules that apply to those paths.
+3. Review every listed file against its rule group — tracked files through `git diff`, untracked files read in full — and record each file as reviewed or skipped with a reason under the Verifier's Standards axis.
 
-**Invocation pattern**:
-```bash
-# Standards axis: use OCR with Thinker context
-ocr review --audience agent \
-  --background "Task: <task description>. Root cause: <diagnosis summary>" \
-  --output /tmp/ocr_standards.json
-```
-
-**Context extraction** (if Thinker output file exists):
-```bash
-context=$(grep -A 20 '## Diagnosis' .tav/thinker-output.md | head -n 15)
-ocr review --audience agent --background "$context" --output /tmp/ocr_standards.json
-```
-
-**Severity mapping to TAV risk levels**:
-- `critical` → blocks completion, escalates TAV to `critical` risk level
-- `high` → requires fix before Actor completion or Verifier approval
-- `medium` → fix during Actor or document as known limitation in Verifier output
-- `low` → typically filtered out as noise in TAV context
-
-**Integration flow**:
-```
-TAV Verifier Phase 3
-  ↓
-Run OCR for Standards axis
-  ↓
-Parse OCR JSON output
-  ↓
-Filter severity: keep critical/high/medium, discard low
-  ↓
-Record in Verifier output under "Standards axis"
-  ↓
-Separately run Spec axis (task definition compliance)
-  ↓
-Combine both axes in final verdict
-```
+`preview` emits `{schema_version, mode, repository, from, to, commit, merge_base, background, total_files, reviewable_count, excluded_count, reviewable_files[], excluded_files[]}`. `rule` emits `{schema_version, groups:[{group_id, source, pattern, files[], rule}]}`.
 
 ### With Spec-Driven Development
 
-When invoked during SDD Phase 5b batch integration:
-
-**Input from SDD**:
-- Task definition from `docs/plan/task-definition.md`
-- Batch context from `docs/plan/task-breakdown.md` § delivery batch description
-- Project rules from governance surfaces resolved in `docs/progress/MASTER.md`
-
-**Invocation pattern**:
-```bash
-# Review one delivery batch before PR
-batch_goal=$(grep -A 3 "Batch.*goal" docs/plan/task-breakdown.md | head -n 2)
-ocr review --audience agent \
-  --from <base-branch> --to <batch-integration-branch> \
-  --background "Batch goal: $batch_goal" \
-  --output /tmp/ocr_batch_<N>.json
-```
-
-**Tier-based effort selection**:
-```bash
-# L0/L1 tasks: low effort (faster, less thorough)
-ocr review --audience agent --effort low --timeout 10 ...
-
-# L2 batch with high-risk components: high effort
-ocr review --audience agent --effort high --timeout 20 ...
-```
-
-**Integration flow**:
-```
-SDD Phase 5b: before creating batch PR
-  ↓
-Run OCR on batch integration branch
-  ↓
-Block PR creation on critical issues
-  ↓
-Fix high issues or document as known risks
-  ↓
-Include OCR report in PR description § "Pre-merge Validation"
-  ↓
-Proceed with PR creation
-```
-
-### Delegate Mode (Advanced)
-
-When TAV or SDD orchestrator performs the review itself using OCR only for deterministic file selection and rule resolution:
-
-**Note**: Delegate mode requires `ocr` v1.10.0+. Check version with `ocr version` before using.
+During Phase 5b batch integration, run the same two commands on the batch integration branch before creating the batch PR:
 
 ```bash
-ocr review --delegate --output /tmp/ocr_delegate.json
+ocr delegate preview --format json --from <base-branch> --to <batch-integration-branch>
+ocr delegate rule --format json <paths from preview>
 ```
 
-**Output format**:
-```json
-{
-  "files": [
-    {
-      "path": "src/main/java/Foo.java",
-      "rule_groups": ["null-check", "sql-injection"],
-      "system_rule": "Check for bugs, security, performance...",
-      "user_rule": "All new methods must validate required parameters"
-    }
-  ]
-}
-```
+Record file-level outcomes per batch task, and keep an unresolved critical finding out of the batch PR until it is fixed or explicitly accepted as a known risk.
 
-The orchestrator then performs the actual LLM review against these files and rules, allowing for custom review logic while reusing OCR's file selection and rule matching.
+### Delegate Command Reference
 
-### Effort and Timeout Tuning
+| Command | Purpose | Key flags |
+|---------|---------|-----------|
+| `ocr delegate preview` | Reviewable file list with mode/ref metadata | `--from`, `--to`, `--commit`, `--exclude`, `--format text\|json` |
+| `ocr delegate rule` | Resolved rules grouped by content | `--format text\|json`, `--rule`, `--background` |
 
-Match OCR effort to change classification (see `../../shared-references/change-classification.md`):
+Delegate commands do not accept `--audience`, `--output`, `--effort`, or `--timeout`; those belong to `ocr review`. Read the output directly, and use `--format json` plus stdout redirection when a tool would truncate it. `ocr --version` v1.9.0 or later provides the delegate commands.
 
-| Classification | Effort | Timeout | Use Case |
-|----------------|--------|---------|----------|
-| L0 (trivial) | N/A | N/A | Skip OCR entirely for L0 changes |
-| L1 (standard) | `low` or `medium` | 10-15 min | Standard TAV Verifier pass |
-| L2 batch | `medium` or `high` | 15-30 min | SDD batch validation |
-| Security-sensitive | `high` | 30-45 min | TAV security-sensitive branch |
+### Pitfalls
 
-**Default effort levels** (in `ocr review`):
-- `low`: 1 review round, fast but may miss subtleties
-- `medium`: 2 review rounds (default), balanced
-- `high`: 3 review rounds, thorough but slower
-
-### Common Pitfalls
-
-- **Truncated output**: Always use `--output <file>` instead of piping stdout through `tail`/`head`
-- **Missing context**: Passing empty `--background` reduces review quality; extract real context from Thinker or task definition
-- **Wrong branch**: In SDD, ensure `--from` is the base branch and `--to` is the batch integration branch, not individual task branches
-- **Ignoring low severity**: While `low` items are often noise, review them once to tune project-specific rules
-- **Rate limits**: If hitting rate limits, reduce `--concurrency` from default 8 to 4 or 2
-
-**Budget**
-
-- `--max-tokens <n>` — per-group prompt ceiling; defaults to the configured value or the template default (`200000`).
-- `--max-tokens-budget <n>` — cap total input + output tokens for the run. Checked before every LLM round: a group already over budget gets one final round to submit findings, no further groups are dispatched, partial results are still published, and skipped files are reported as `failed(budget)`.
-- `--no-filter` — keep all review comments and skip the LLM post-filtering call.
+- **Wrong branch**: in SDD, `--from` is the base branch and `--to` is the batch integration branch, not a task branch.
+- **Missing context**: pass `--background` (or `--background-file`) so rule resolution sees the task intent; this does not make OCR call an LLM.
+- **Skipped coverage**: every reviewable file must end as reviewed or skipped with a reason; silently ignoring the list defeats the purpose of delegation.
+- **Installing at review time**: never install `ocr` during a review; if it is missing or older, fall back to the manual Standards pass.
 
 ## Gotchas
 
