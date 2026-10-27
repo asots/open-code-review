@@ -14,6 +14,9 @@ compatibility: >
   @alibaba-group/open-code-review` or GitHub release binary). Requires a
   configured supported LLM provider before first run (protocols: Anthropic,
   OpenAI Chat Completions, OpenAI Responses, AWS Bedrock).
+  Integrates with:
+  - tav-workflow >=3.20.0 (Verifier Standards axis)
+  - spec-driven-develop >=1.29.0 (Phase 5b batch validation)
 metadata:
   author: alibaba
   homepage: https://github.com/alibaba/open-code-review
@@ -185,6 +188,153 @@ Beyond the common flags above, `ocr review` exposes a few groups of controls. Ru
 **Model**
 
 - `--provider <name>` / `--model <name>` — override the configured provider/model for this run only (for example, to recheck a diff with a different model; the user names the model, `ocr llm providers` lists the built-ins).
+
+**Budget**
+
+- `--max-tokens <n>` — per-group prompt ceiling; defaults to the configured value or the template default (`200000`).
+- `--max-tokens-budget <n>` — cap total input + output tokens for the run. Checked before every LLM round: a group already over budget gets one final round to submit findings, no further groups are dispatched, partial results are still published, and skipped files are reported as `failed(budget)`.
+- `--no-filter` — keep all review comments and skip the LLM post-filtering call.
+
+## Integration with TAV and Spec-Driven Development
+
+### With TAV Workflow
+
+When invoked from TAV Verifier (Phase 3), OCR handles the **Standards axis** of the two-axis review:
+
+**Input from TAV**:
+- Business context from Thinker's diagnosis (`.tav/thinker-output.md` or Thinker phase output)
+- Changed files from `git diff` output
+- Project rules from `.opencodereview/rule.json` or TAV-managed governance surfaces
+
+**Invocation pattern**:
+```bash
+# Standards axis: use OCR with Thinker context
+ocr review --audience agent \
+  --background "Task: <task description>. Root cause: <diagnosis summary>" \
+  --output /tmp/ocr_standards.json
+```
+
+**Context extraction** (if Thinker output file exists):
+```bash
+context=$(grep -A 20 '## Diagnosis' .tav/thinker-output.md | head -n 15)
+ocr review --audience agent --background "$context" --output /tmp/ocr_standards.json
+```
+
+**Severity mapping to TAV risk levels**:
+- `critical` → blocks completion, escalates TAV to `critical` risk level
+- `high` → requires fix before Actor completion or Verifier approval
+- `medium` → fix during Actor or document as known limitation in Verifier output
+- `low` → typically filtered out as noise in TAV context
+
+**Integration flow**:
+```
+TAV Verifier Phase 3
+  ↓
+Run OCR for Standards axis
+  ↓
+Parse OCR JSON output
+  ↓
+Filter severity: keep critical/high/medium, discard low
+  ↓
+Record in Verifier output under "Standards axis"
+  ↓
+Separately run Spec axis (task definition compliance)
+  ↓
+Combine both axes in final verdict
+```
+
+### With Spec-Driven Development
+
+When invoked during SDD Phase 5b batch integration:
+
+**Input from SDD**:
+- Task definition from `docs/plan/task-definition.md`
+- Batch context from `docs/plan/task-breakdown.md` § delivery batch description
+- Project rules from governance surfaces resolved in `docs/progress/MASTER.md`
+
+**Invocation pattern**:
+```bash
+# Review one delivery batch before PR
+batch_goal=$(grep -A 3 "Batch.*goal" docs/plan/task-breakdown.md | head -n 2)
+ocr review --audience agent \
+  --from <base-branch> --to <batch-integration-branch> \
+  --background "Batch goal: $batch_goal" \
+  --output /tmp/ocr_batch_<N>.json
+```
+
+**Tier-based effort selection**:
+```bash
+# L0/L1 tasks: low effort (faster, less thorough)
+ocr review --audience agent --effort low --timeout 10 ...
+
+# L2 batch with high-risk components: high effort
+ocr review --audience agent --effort high --timeout 20 ...
+```
+
+**Integration flow**:
+```
+SDD Phase 5b: before creating batch PR
+  ↓
+Run OCR on batch integration branch
+  ↓
+Block PR creation on critical issues
+  ↓
+Fix high issues or document as known risks
+  ↓
+Include OCR report in PR description § "Pre-merge Validation"
+  ↓
+Proceed with PR creation
+```
+
+### Delegate Mode (Advanced)
+
+When TAV or SDD orchestrator performs the review itself using OCR only for deterministic file selection and rule resolution:
+
+**Note**: Delegate mode requires `ocr` v1.10.0+. Check version with `ocr version` before using.
+
+```bash
+ocr review --delegate --output /tmp/ocr_delegate.json
+```
+
+**Output format**:
+```json
+{
+  "files": [
+    {
+      "path": "src/main/java/Foo.java",
+      "rule_groups": ["null-check", "sql-injection"],
+      "system_rule": "Check for bugs, security, performance...",
+      "user_rule": "All new methods must validate required parameters"
+    }
+  ]
+}
+```
+
+The orchestrator then performs the actual LLM review against these files and rules, allowing for custom review logic while reusing OCR's file selection and rule matching.
+
+### Effort and Timeout Tuning
+
+Match OCR effort to change classification (see `../../shared-references/change-classification.md`):
+
+| Classification | Effort | Timeout | Use Case |
+|----------------|--------|---------|----------|
+| L0 (trivial) | N/A | N/A | Skip OCR entirely for L0 changes |
+| L1 (standard) | `low` or `medium` | 10-15 min | Standard TAV Verifier pass |
+| L2 batch | `medium` or `high` | 15-30 min | SDD batch validation |
+| Security-sensitive | `high` | 30-45 min | TAV security-sensitive branch |
+
+**Default effort levels** (in `ocr review`):
+- `low`: 1 review round, fast but may miss subtleties
+- `medium`: 2 review rounds (default), balanced
+- `high`: 3 review rounds, thorough but slower
+
+### Common Pitfalls
+
+- **Truncated output**: Always use `--output <file>` instead of piping stdout through `tail`/`head`
+- **Missing context**: Passing empty `--background` reduces review quality; extract real context from Thinker or task definition
+- **Wrong branch**: In SDD, ensure `--from` is the base branch and `--to` is the batch integration branch, not individual task branches
+- **Ignoring low severity**: While `low` items are often noise, review them once to tune project-specific rules
+- **Rate limits**: If hitting rate limits, reduce `--concurrency` from default 8 to 4 or 2
 
 **Budget**
 
